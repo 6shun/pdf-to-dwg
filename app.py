@@ -11,18 +11,25 @@ TEMP_DIR.mkdir(exist_ok=True)
 st.set_page_config(page_title="PDF to DWG Converter", layout="wide")
 
 def convert_pdf_to_dxf(input_pdf, output_dxf):
-    """Uses Inkscape CLI to extract vectors from PDF to DXF."""
+    """Uses xvfb-run to execute Inkscape in a headless cloud environment."""
     try:
-        # Inkscape command for PDF to DXF conversion
-        subprocess.run([
+        # Wrap the command with xvfb-run
+        cmd = [
+            "xvfb-run", 
+            "-a", # -a automatically finds a free server number
             "inkscape", 
             str(input_pdf), 
             "--export-type=dxf", 
             f"--export-filename={output_dxf}"
-        ], check=True, capture_output=True)
+        ]
+        
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
         return True
+    except subprocess.CalledProcessError as e:
+        st.error(f"Conversion failed: {e.stderr}")
+        return False
     except Exception as e:
-        st.error(f"Inkscape Error: {e}")
+        st.error(f"Unexpected Error: {e}")
         return False
 
 def convert_dxf_to_dwg(input_dxf_folder, output_dwg_folder):
