@@ -11,28 +11,19 @@ TEMP_DIR.mkdir(exist_ok=True)
 st.set_page_config(page_title="Free PDF to CAD", page_icon="🏗️")
 
 def convert_pdf_to_dxf(input_pdf, output_dxf):
-    """
-    Uses pstoedit (headless) to convert PDF to DXF.
-    Stable for Streamlit Cloud.
-    """
     try:
-        # Command: pstoedit -f dxf:-polyline input.pdf output.dxf
-        # -polyline ensures curves are handled correctly for CAD
+        # Added -gs:ps2write to force the older, more stable conversion path
         cmd = [
             "pstoedit",
             "-f", "dxf:-polyline",
+            "-df", "Courier", # Fallback for missing fonts
             str(input_pdf),
             str(output_dxf)
         ]
-        
-        # Run the command
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, check=True, capture_output=True)
         return True
-    except subprocess.CalledProcessError as e:
-        st.error(f"Conversion Error: {e.stderr}")
-        return False
     except Exception as e:
-        st.error(f"System Error: {e}")
+        st.error(f"Error: {e}")
         return False
 
 # --- UI ---
