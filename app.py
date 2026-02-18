@@ -1,107 +1,98 @@
 import streamlit as st
-import subprocess
+import cloudconvert
 import os
-import zipfile
+import time
+import requests
 from pathlib import Path
 
 # --- CONFIGURATION ---
-TEMP_DIR = Path("temp_conversion")
-TEMP_DIR.mkdir(exist_ok=True)
+# It is better to set this in Streamlit Secrets (Settings > Secrets) as: CLOUDCONVERT_API_KEY = "your_key"
+API_KEY = st.secrets.get("CLOUDCONVERT_API_KEY", "PASTE_YOUR_KEY_HERE_IF_NOT_USING_SECRETS")
 
-st.set_page_config(page_title="PDF to DWG Converter", layout="wide")
+# Initialize CloudConvert
+if API_KEY != "PASTE_YOUR_KEY_HERE_IF_NOT_USING_SECRETS":
+    cloudconvert_api = cloudconvert.Api(api_key=API_KEY)
+else:
+    st.error("Please set your CloudConvert API Key in Streamlit Secrets.")
 
-def convert_pdf_to_dxf(input_pdf, output_dxf):
-    """Uses xvfb-run to execute Inkscape in a headless cloud environment."""
-    try:
-        # Wrap the command with xvfb-run
-        cmd = [
-            "xvfb-run", 
-            "-a", # -a automatically finds a free server number
-            "inkscape", 
-            str(input_pdf), 
-            "--export-type=dxf", 
-            f"--export-filename={output_dxf}"
-        ]
-        
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        st.error(f"Conversion failed: {e.stderr}")
-        return False
-    except Exception as e:
-        st.error(f"Unexpected Error: {e}")
-        return False
+st.set_page_config(page_title="Professional PDF to DWG", page_icon="🏗️")
 
-def convert_dxf_to_dwg(input_dxf_folder, output_dwg_folder):
-    """Uses ODA File Converter to wrap DXF into DWG."""
-    # Command Format: ODAFileConverter input_dir output_dir OUT_VER OUT_TYPE RECURSE AUDIT
-    try:
-        subprocess.run([
-            "ODAFileConverter", 
-            str(input_dxf_folder), 
-            str(output_dwg_folder), 
-            "ACAD2018", "DWG", "0", "1"
-        ], check=True, capture_output=True)
-        return True
-    except Exception as e:
-        st.warning("ODA Converter not found or failed. Returning DXF instead.")
-        return False
+st.title("🏗️ Professional PDF to DWG Converter")
+st.markdown("""
+This app uses a dedicated CAD engine to convert PDFs into **real DWG files**.
+* **Cloud-Stable:** No segmentation faults.
+* **Format:** Returns AutoCAD-compatible DWG files.
+""")
 
-# --- UI INTERFACE ---
-st.title("🏗️ Batch PDF to DWG/DXF Converter")
-st.info("Upload PDF blueprints to convert them into editable CAD files.")
+# --- FILE UPLOAD ---
+uploaded_files = st.file_uploader("Upload PDF blueprints", type="pdf", accept_multiple_files=True)
 
-uploaded_files = st.file_uploader(
-    "Choose PDF files", type="pdf", accept_multiple_files=True
-)
+if uploaded_files and API_KEY:
+    if st.button("🚀 Start Conversion"):
+        for uploaded_file in uploaded_files:
+            with st.status(f"Converting {uploaded_file.name}...", expanded=True) as status:
+                try:
+                    # 1. Create a temporary local file
+                    temp_pdf = Path(f"temp_{uploaded_file.name}")
+                    with open(temp_pdf, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
 
-if uploaded_files:
-    if st.button("🚀 Start Batch Conversion"):
-        converted_files = []
-        progress_bar = st.progress(0)
-        
-        for i, uploaded_file in enumerate(uploaded_files):
-            # Save uploaded file to temp
-            pdf_path = TEMP_DIR / uploaded_file.name
-            dxf_path = TEMP_DIR / uploaded_file.name.replace(".pdf", ".dxf")
-            
-            with open(pdf_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            # Step 1: PDF -> DXF
-            with st.spinner(f"Processing {uploaded_file.name}..."):
-                success = convert_pdf_to_dxf(pdf_path, dxf_path)
-            
-            if success:
-                converted_files.append(dxf_path)
-            
-            progress_bar.progress((i + 1) / len(uploaded_files))
+                    # 2. Start CloudConvert Job
+                    # We convert PDF -> DWG
+                    job = cloudconvert_api.Job.create(payload={
+                        "tasks": {
+                            "import-my-file": {
+                                "operation": "import/upload"
+                            },
+                            "convert-my-file": {
+                                "operation": "convert",
+                                "input": "import-my-file",
+                                "output_format": "dwg",
+                                "engine": "autocad" # High quality engine
+                            },
+                            "export-my-file": {
+                                "operation": "export/url",
+                                "input": "convert-my-file"
+                            }
+                        }
+                    })
 
-        # Optional Step 2: Try DXF -> DWG (requires ODA File Converter)
-        convert_dxf_to_dwg(TEMP_DIR, TEMP_DIR)
+                    # 3. Upload the file to the import task
+                    upload_task = [t for t in job['tasks'] if t['name'] == 'import-my-file'][0]
+                    cloudconvert_api.Task.upload(file_name=str(temp_pdf), task=upload_task)
 
-        # Zip results for download
-        zip_path = TEMP_DIR / "converted_cad_files.zip"
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for file in TEMP_DIR.glob("*.dwg"):
-                zipf.write(file, arcname=file.name)
-            # Fallback to DXF if DWG conversion didn't run
-            if not list(TEMP_DIR.glob("*.dwg")):
-                for file in TEMP_DIR.glob("*.dxf"):
-                    zipf.write(file, arcname=file.name)
+                    # 4. Wait for job completion
+                    status.write("Engine processing CAD vectors...")
+                    res = cloudconvert_api.Job.wait(job['id'])
+                    
+                    # 5. Get the download URL
+                    export_task = [t for t in res['tasks'] if t['name'] == 'export-my-file'][0]
+                    file_url = export_task['result']['files'][0]['url']
+                    file_name = export_task['result']['files'][0]['filename']
 
-        st.success("✅ Conversion Complete!")
-        
-        with open(zip_path, "rb") as f:
-            st.download_button(
-                label="📥 Download All Converted Files",
-                data=f,
-                file_name="cad_export.zip",
-                mime="application/zip"
-            )
+                    # 6. Download file and provide to user
+                    response = requests.get(file_url)
+                    st.download_button(
+                        label=f"📥 Download {file_name}",
+                        data=response.content,
+                        file_name=file_name,
+                        mime="application/acad"
+                    )
+                    
+                    # Cleanup
+                    os.remove(temp_pdf)
+                    status.update(label=f"✅ {uploaded_file.name} Finished!", state="complete")
 
-# Cleanup instructions
-if st.sidebar.button("🧹 Clear Temp Files"):
-    for file in TEMP_DIR.glob("*"):
-        os.remove(file)
-    st.sidebar.write("Temp files deleted.")
+                except Exception as e:
+                    st.error(f"Error converting {uploaded_file.name}: {str(e)}")
+
+# --- SIDEBAR INFO ---
+with st.sidebar:
+    st.header("Setup Instructions")
+    st.write("1. Create account at [CloudConvert](https://cloudconvert.com)")
+    st.write("2. Copy your API Key.")
+    st.write("3. Add it to Streamlit Secrets or paste in the code.")
+    st.divider()
+    if st.button("Clear Cache"):
+        st.cache_data.clear()
+        st.write("Cache cleared.")
