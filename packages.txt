@@ -1,2 +1,2 @@
-inkscape
-xvfb
+pstoedit
+ghostscript
