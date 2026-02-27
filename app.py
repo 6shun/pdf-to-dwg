@@ -6,80 +6,73 @@ import numpy as np
 import cv2
 from PIL import Image
 
-st.set_page_config(page_title="Universal PDF to DXF", page_icon="🏗️")
+st.set_page_config(page_title="Pro PDF-to-CAD Converter", page_icon="📐")
 
-def trace_image_to_dxf(pdf_file, msp, scale_factor):
-    """Converts raster/scanned PDF pages to DXF lines using OpenCV."""
-    pdf = pdfium.PdfDocument(pdf_file)
-    for page in pdf:
-        # 1. Render PDF page to image (300 DPI for accuracy)
-        bitmap = page.render(scale=4) # scale=4 provides high res for tracing
-        pil_image = bitmap.to_pil()
+def process_scanned_page(page, msp, scale, simplify_factor, noise_level):
+    # 1. High-Res Render (DPI matters for tracing)
+    bitmap = page.render(scale=4) 
+    pil_img = bitmap.to_pil().convert("L") # Grayscale
+    img = np.array(pil_img)
+
+    # 2. Denoising (Removes speckles from old scans)
+    if noise_level > 0:
+        img = cv2.medianBlur(img, noise_level if noise_level % 2 != 0 else noise_level + 1)
+
+    # 3. Thresholding (Adaptive works better for uneven scans)
+    thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 11, 2)
+
+    # 4. Skeletonization (Thinning the lines to a 1-pixel spine)
+    # This prevents the "hollow double line" effect
+    kernel = np.ones((3,3), np.uint8)
+    skeleton = cv2.ximgproc.thinning(thresh) if hasattr(cv2, 'ximgproc') else thresh
+
+    # 5. Find Contours
+    contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    for cnt in contours:
+        # 6. Douglas-Peucker Simplification
+        # This turns "jittery" lines into smooth CAD lines
+        epsilon = simplify_factor * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, False)
         
-        # 2. Convert to OpenCV format (Grayscale)
-        opencv_img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2GRAY)
+        points = []
+        for pt in approx:
+            x, y = pt[0]
+            # Flip Y for CAD space (Origin at bottom-left)
+            points.append((x * scale, (pil_img.height - y) * scale))
         
-        # 3. Thresholding: Make it strictly Black and White
-        _, thresh = cv2.threshold(opencv_img, 127, 255, cv2.THRESH_BINARY_INV)
-        
-        # 4. Find Contours (The 'Tracing' part)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for cnt in contours:
-            # Simplify the contour to reduce DXF file size
-            epsilon = 0.001 * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True)
-            
-            points = []
-            for pt in approx:
-                x, y = pt[0]
-                # Flip Y coordinate because Images start top-left, CAD starts bottom-left
-                points.append((x * scale_factor, (pil_image.height - y) * scale_factor))
-            
-            if len(points) > 1:
-                msp.add_lwpolyline(points)
+        if len(points) >= 2:
+            msp.add_lwpolyline(points)
 
-def convert_pdf_to_dxf(pdf_file, scale_factor):
-    pdf = pdfium.PdfDocument(pdf_file)
-    doc = ezdxf.new('R2010')
-    msp = doc.modelspace()
-    
-    found_vectors = False
-    for page in pdf:
-        for obj in page.get_objects():
-            if obj.type == 2: # Path
-                found_vectors = True
-                path_data = obj.get_path()
-                points = []
-                for segment in path_data:
-                    if hasattr(segment, 'points'):
-                        for pt in segment.points:
-                            points.append((pt.x * scale_factor, pt.y * scale_factor))
-                if len(points) >= 2:
-                    msp.add_lwpolyline(points)
+def main():
+    st.title("📐 Pro PDF to DXF Converter")
+    st.markdown("Uses **Skeletonization** and **Douglas-Peucker** algorithms for cleaner CAD output.")
 
-    # If no vectors were found, trigger the Tracing logic
-    if not found_vectors:
-        st.info("No vectors detected. Switching to 'Scanned Image' tracing mode...")
-        trace_image_to_dxf(pdf_file, msp, scale_factor)
+    with st.sidebar:
+        st.header("Tuning Controls")
+        scale = st.number_input("Global Scale", value=0.1)
+        simplify = st.slider("Line Simplification", 0.001, 0.05, 0.01, help="Higher = straighter lines, lower = more detail.")
+        noise = st.slider("Denoise Strength", 0, 9, 3, step=2)
 
-    dxf_buffer = io.StringIO()
-    doc.write(dxf_buffer)
-    return dxf_buffer.getvalue()
+    uploaded_file = st.file_uploader("Upload Scanned or Vector PDF", type="pdf")
 
-# --- Streamlit UI ---
-st.title("🏗️ Universal PDF to DXF Converter")
-st.write("Supports both **Vector PDFs** and **Scanned Blueprints**.")
+    if uploaded_file:
+        if st.button("Generate Professional DXF"):
+            pdf = pdfium.PdfDocument(uploaded_file)
+            doc = ezdxf.new('R2010')
+            msp = doc.modelspace()
 
-scale = st.sidebar.number_input("Scale Factor", value=0.1)
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+            progress_bar = st.progress(0)
+            for i, page in enumerate(pdf):
+                process_scanned_page(page, msp, scale, simplify, noise)
+                progress_bar.progress((i + 1) / len(pdf))
 
-if uploaded_file:
-    if st.button("Convert Now"):
-        with st.spinner("Processing... (Scans take longer)"):
-            try:
-                result = convert_pdf_to_dxf(uploaded_file, scale)
-                st.success("Conversion Finished!")
-                st.download_button("Download DXF", result, "output.dxf", "application/dxf")
-            except Exception as e:
-                st.error(f"Error: {e}")
+            # Buffer and Download
+            out_buf = io.StringIO()
+            doc.write(out_buf)
+            st.success("Conversion Complete!")
+            st.download_button("Download DXF", out_buf.getvalue(), "pro_output.dxf", "application/dxf")
+
+if __name__ == "__main__":
+    main()
