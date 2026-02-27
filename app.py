@@ -2,78 +2,84 @@ import streamlit as st
 import ezdxf
 import pypdfium2 as pdfium
 import io
+import numpy as np
+import cv2
+from PIL import Image
 
-# Page Configuration
-st.set_page_config(page_title="PDF to DXF Converter", page_icon="📐")
+st.set_page_config(page_title="Universal PDF to DXF", page_icon="🏗️")
+
+def trace_image_to_dxf(pdf_file, msp, scale_factor):
+    """Converts raster/scanned PDF pages to DXF lines using OpenCV."""
+    pdf = pdfium.PdfDocument(pdf_file)
+    for page in pdf:
+        # 1. Render PDF page to image (300 DPI for accuracy)
+        bitmap = page.render(scale=4) # scale=4 provides high res for tracing
+        pil_image = bitmap.to_pil()
+        
+        # 2. Convert to OpenCV format (Grayscale)
+        opencv_img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2GRAY)
+        
+        # 3. Thresholding: Make it strictly Black and White
+        _, thresh = cv2.threshold(opencv_img, 127, 255, cv2.THRESH_BINARY_INV)
+        
+        # 4. Find Contours (The 'Tracing' part)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for cnt in contours:
+            # Simplify the contour to reduce DXF file size
+            epsilon = 0.001 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            
+            points = []
+            for pt in approx:
+                x, y = pt[0]
+                # Flip Y coordinate because Images start top-left, CAD starts bottom-left
+                points.append((x * scale_factor, (pil_image.height - y) * scale_factor))
+            
+            if len(points) > 1:
+                msp.add_lwpolyline(points)
 
 def convert_pdf_to_dxf(pdf_file, scale_factor):
-    # Load the PDF document
     pdf = pdfium.PdfDocument(pdf_file)
-    
-    # Create a new DXF document (R2010 for high compatibility)
     doc = ezdxf.new('R2010')
     msp = doc.modelspace()
     
-    vector_count = 0
-
+    found_vectors = False
     for page in pdf:
-        # Get all objects (Path, Text, Image, etc.)
         for obj in page.get_objects():
-            # Type 2 corresponds to PATH objects (lines, shapes)
-            if obj.type == 2:
-                try:
-                    path_data = obj.get_path()
-                    points = []
-                    
-                    for segment in path_data:
-                        # Extract and scale coordinates
-                        if hasattr(segment, 'points'):
-                            for pt in segment.points:
-                                # PDF coords are typically (x, y)
-                                points.append((pt.x * scale_factor, pt.y * scale_factor))
-                    
-                    if len(points) >= 2:
-                        msp.add_lwpolyline(points)
-                        vector_count += 1
-                except Exception:
-                    continue
+            if obj.type == 2: # Path
+                found_vectors = True
+                path_data = obj.get_path()
+                points = []
+                for segment in path_data:
+                    if hasattr(segment, 'points'):
+                        for pt in segment.points:
+                            points.append((pt.x * scale_factor, pt.y * scale_factor))
+                if len(points) >= 2:
+                    msp.add_lwpolyline(points)
 
-    if vector_count == 0:
-        raise ValueError("No vector paths found. This PDF might be a scanned image.")
+    # If no vectors were found, trigger the Tracing logic
+    if not found_vectors:
+        st.info("No vectors detected. Switching to 'Scanned Image' tracing mode...")
+        trace_image_to_dxf(pdf_file, msp, scale_factor)
 
-    # Write DXF to a string buffer
     dxf_buffer = io.StringIO()
     doc.write(dxf_buffer)
     return dxf_buffer.getvalue()
 
-# --- UI Layout ---
-st.title("📐 PDF to DXF Online Converter")
-st.markdown("""
-Convert vector-based PDFs (from AutoCAD, Rhino, etc.) into DXF files that you can open in any CAD software.
-""")
+# --- Streamlit UI ---
+st.title("🏗️ Universal PDF to DXF Converter")
+st.write("Supports both **Vector PDFs** and **Scanned Blueprints**.")
 
-st.sidebar.header("Settings")
-scale = st.sidebar.number_input("Scale Factor", value=1.0, help="Multiply coordinates by this value (e.g., 25.4 to convert inches to mm).")
-
-uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
+scale = st.sidebar.number_input("Scale Factor", value=0.1)
+uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
 if uploaded_file:
-    if st.button("Convert to DXF"):
-        with st.spinner("Analyzing PDF vectors..."):
+    if st.button("Convert Now"):
+        with st.spinner("Processing... (Scans take longer)"):
             try:
-                dxf_output = convert_pdf_to_dxf(uploaded_file, scale)
-                
-                st.success(f"Success! Converted into DXF format.")
-                st.download_button(
-                    label="💾 Download DXF File",
-                    data=dxf_output,
-                    file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}.dxf",
-                    mime="application/dxf"
-                )
-            except ValueError as ve:
-                st.warning(f"Notice: {ve}")
+                result = convert_pdf_to_dxf(uploaded_file, scale)
+                st.success("Conversion Finished!")
+                st.download_button("Download DXF", result, "output.dxf", "application/dxf")
             except Exception as e:
-                st.error(f"An unexpected error occurred: {e}")
-
-st.divider()
-st.info("💡 **Pro Tip:** If the downloaded file is empty, the PDF is likely a 'raster' (scanned image). This tool only works with 'vector' PDFs exported directly from design software.")
+                st.error(f"Error: {e}")
