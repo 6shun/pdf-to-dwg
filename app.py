@@ -1,74 +1,59 @@
 import streamlit as st
-import subprocess
+import ezdxf
+import pypdfium2 as pdfium
+import io
 import os
-import zipfile
-from pathlib import Path
 
-# Setup temporary directory
-TEMP_DIR = Path("temp_conversion")
-TEMP_DIR.mkdir(exist_ok=True)
+st.set_page_config(page_title="PDF to DXF Converter", page_icon="🏗️")
 
-st.set_page_config(page_title="Free PDF to CAD", page_icon="🏗️")
+st.title("🏗️ PDF to DXF Converter")
+st.write("Upload a vector PDF to convert it into a CAD-readable DXF format.")
 
-def convert_pdf_to_dxf(input_pdf, output_dxf):
-    try:
-        # Added -gs:ps2write to force the older, more stable conversion path
-        cmd = [
-            "pstoedit",
-            "-f", "dxf:-polyline",
-            "-df", "Courier", # Fallback for missing fonts
-            str(input_pdf),
-            str(output_dxf)
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)
-        return True
-    except Exception as e:
-        st.error(f"Error: {e}")
-        return False
+uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
-# --- UI ---
-st.title("🏗️ Free Batch PDF to DXF Converter")
-st.info("Converts vector PDFs to DXF (CAD) for free. Best for blueprints and schematics.")
-
-uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
-
-if uploaded_files:
-    if st.button("🚀 Convert to DXF"):
-        dxf_files = []
+def convert_pdf_to_dxf(pdf_file):
+    # Load the PDF
+    pdf = pdfium.PdfDocument(pdf_file)
+    
+    # Create a new DXF document (R2010 is widely compatible)
+    doc = ezdxf.new('R2010')
+    msp = doc.modelspace()
+    
+    for page_index in range(len(pdf)):
+        page = pdf[page_index]
+        # High-level extraction of vector paths
+        # Note: This assumes the PDF contains vector data, not just a scanned image
+        path_objects = page.get_objects()
         
-        for uploaded_file in uploaded_files:
-            pdf_path = TEMP_DIR / uploaded_file.name
-            dxf_name = uploaded_file.name.replace(".pdf", ".dxf")
-            dxf_path = TEMP_DIR / dxf_name
-            
-            # Save upload to temp
-            with open(pdf_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            # Convert
-            with st.spinner(f"Processing {uploaded_file.name}..."):
-                if convert_pdf_to_dxf(pdf_path, dxf_path):
-                    dxf_files.append(dxf_path)
-        
-        if dxf_files:
-            st.success(f"Successfully converted {len(dxf_files)} files!")
-            
-            # If multiple files, create a ZIP
-            if len(dxf_files) > 1:
-                zip_path = TEMP_DIR / "converted_files.zip"
-                with zipfile.ZipFile(zip_path, 'w') as zipf:
-                    for f in dxf_files:
-                        zipf.write(f, arcname=f.name)
+        for obj in path_objects:
+            if obj.type == pdfium.PDFOBJ_PATH:
+                path_data = obj.get_path()
+                # Simplified path extraction
+                points = []
+                for segment in path_data:
+                    # Capture coordinates (x, y)
+                    points.append((segment[1], segment[2]))
                 
-                with open(zip_path, "rb") as f:
-                    st.download_button("📥 Download All (ZIP)", f, "cad_drawings.zip")
-            else:
-                # If single file, download directly
-                with open(dxf_files[0], "rb") as f:
-                    st.download_button(f"📥 Download {dxf_files[0].name}", f, dxf_files[0].name)
+                if len(points) >= 2:
+                    msp.add_lwpolyline(points)
 
-# Sidebar cleanup
-if st.sidebar.button("🧹 Clear temporary files"):
-    for file in TEMP_DIR.glob("*"):
-        os.remove(file)
-    st.sidebar.write("Cleaned!")
+    # Save to a buffer
+    dxf_buffer = io.StringIO()
+    doc.write(dxf_buffer)
+    return dxf_buffer.getvalue()
+
+if uploaded_file:
+    with st.spinner("Processing vectors..."):
+        try:
+            dxf_data = convert_pdf_to_dxf(uploaded_file)
+            
+            st.success("Conversion complete!")
+            st.download_button(
+                label="Download DXF File",
+                data=dxf_data,
+                file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}.dxf",
+                mime="application/dxf"
+            )
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+            st.info("Note: This tool works best with vector PDFs (exported from CAD). Scanned PDFs require OCR/Trace logic.")
