@@ -4,3 +4,4 @@ pypdfium2
 opencv-contrib-python-headless
 numpy
 Pillow
+pytesseract

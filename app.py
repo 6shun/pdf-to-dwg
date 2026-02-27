@@ -4,43 +4,43 @@ import pypdfium2 as pdfium
 import io
 import numpy as np
 import cv2
-from PIL import Image
+import pytesseract
 
-st.set_page_config(page_title="Pro PDF-to-CAD Converter", page_icon="📐")
-
-def process_scanned_page(page, msp, scale, simplify_factor, noise_level):
-    # 1. High-Res Render (DPI matters for tracing)
-    bitmap = page.render(scale=4) 
-    pil_img = bitmap.to_pil().convert("L") # Grayscale
+def process_clean_page(page, msp, scale, simplify_factor):
+    # 1. Render to Image
+    bitmap = page.render(scale=4)
+    pil_img = bitmap.to_pil().convert("L")
     img = np.array(pil_img)
+    
+    # 2. OCR Step: Find Text and Mask it
+    # We use pytesseract to get 'data' which includes bounding boxes
+    ocr_data = pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT)
+    
+    for i in range(len(ocr_data['text'])):
+        if int(ocr_data['conf'][i]) > 50:  # Only trust high-confidence text
+            x, y, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+            text_str = ocr_data['text'][i].strip()
+            
+            if text_str:
+                # Add real Text to CAD
+                msp.add_text(text_str, height=h*scale).set_placement(
+                    (x * scale, (pil_img.height - (y + h)) * scale)
+                )
+                # MASK: Draw a white rectangle over the text so the tracer ignores it
+                cv2.rectangle(img, (x, y), (x + w, y + h), (255), -1)
 
-    # 2. Denoising (Removes speckles from old scans)
-    if noise_level > 0:
-        img = cv2.medianBlur(img, noise_level if noise_level % 2 != 0 else noise_level + 1)
-
-    # 3. Thresholding (Adaptive works better for uneven scans)
+    # 3. Tracing Step (now ignoring the masked text areas)
     thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                    cv2.THRESH_BINARY_INV, 11, 2)
-
-    # 4. Skeletonization (Thinning the lines to a 1-pixel spine)
-    # This prevents the "hollow double line" effect
-    kernel = np.ones((3,3), np.uint8)
+    
+    # Skeletonize to keep lines thin
     skeleton = cv2.ximgproc.thinning(thresh) if hasattr(cv2, 'ximgproc') else thresh
-
-    # 5. Find Contours
     contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     for cnt in contours:
-        # 6. Douglas-Peucker Simplification
-        # This turns "jittery" lines into smooth CAD lines
         epsilon = simplify_factor * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, epsilon, False)
-        
-        points = []
-        for pt in approx:
-            x, y = pt[0]
-            # Flip Y for CAD space (Origin at bottom-left)
-            points.append((x * scale, (pil_img.height - y) * scale))
+        points = [(pt[0][0] * scale, (pil_img.height - pt[0][1]) * scale) for pt in approx]
         
         if len(points) >= 2:
             msp.add_lwpolyline(points)
