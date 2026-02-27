@@ -11,34 +11,34 @@ st.write("Upload a vector PDF to convert it into a CAD-readable DXF format.")
 
 uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
+import pypdfium2 as pdfium
+import ezdxf
+import io
+
 def convert_pdf_to_dxf(pdf_file):
     pdf = pdfium.PdfDocument(pdf_file)
     doc = ezdxf.new('R2010')
     msp = doc.modelspace()
     
-    # PDF coordinates usually start from bottom-left
-    # DXF coordinates also start from bottom-left
-    
-    for page_index in range(len(pdf)):
-        page = pdf[page_index]
-        
-        # This is the modern way to loop through objects
+    for page in pdf:
+        # Loop through all objects on the page
         for obj in page.get_objects():
-            # Check if the object is a PATH (lines, rectangles, etc.)
-            # Type 2 is usually the constant for PATH in PDFium
-            if obj.get_type() == 2: 
+            # Check the integer type directly
+            # 2 = PATH (Lines, Rectangles), 1 = TEXT
+            if obj.type == 2: 
                 path_data = obj.get_path()
                 points = []
                 
-                # Iterate through path segments (MoveTo, LineTo, etc.)
+                # Iterate through drawing segments
                 for segment in path_data:
-                    # Each segment contains points; we extract the last (x, y)
-                    if len(segment.points) > 0:
-                        pt = segment.points[-1]
-                        points.append((pt.x, pt.y))
+                    # In newer versions, segment is an object with 'points'
+                    if hasattr(segment, 'points') and len(segment.points) > 0:
+                        # Grab the (x, y) of the last point in the segment
+                        last_pt = segment.points[-1]
+                        points.append((last_pt.x, last_pt.y))
                 
+                # If we have at least 2 points, draw a line in CAD
                 if len(points) >= 2:
-                    # Create the polyline in CAD space
                     msp.add_lwpolyline(points)
 
     dxf_buffer = io.StringIO()
