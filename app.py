@@ -15,32 +15,36 @@ def convert_pdf_to_dxf(pdf_file):
     # Load the PDF
     pdf = pdfium.PdfDocument(pdf_file)
     
-    # Create a new DXF document (R2010 is widely compatible)
+    # Create a new DXF document
     doc = ezdxf.new('R2010')
     msp = doc.modelspace()
     
     for page_index in range(len(pdf)):
         page = pdf[page_index]
-        # High-level extraction of vector paths
-        # Note: This assumes the PDF contains vector data, not just a scanned image
-        path_objects = page.get_objects()
+        # Get all objects on the page
+        obj_list = page.get_objects()
         
-        for obj in path_objects:
-            if obj.type == pdfium.PDFOBJ_PATH:
+        for obj in obj_list:
+            # In pypdfium2 v4+, we check the object type via constants
+            # or by checking if it's a 'PdfPath' object
+            if isinstance(obj, pdfium.PdfPath):
+                # Get the path segments (moves, lines, curves)
                 path_data = obj.get_path()
-                # Simplified path extraction
                 points = []
+                
                 for segment in path_data:
-                    # Capture coordinates (x, y)
-                    points.append((segment[1], segment[2]))
+                    # segment usually returns (type, x, y) or similar
+                    # We extract the coordinate points
+                    if len(segment) >= 3:
+                        points.append((segment[-2], segment[-1]))
                 
                 if len(points) >= 2:
                     msp.add_lwpolyline(points)
 
-    # Save to a buffer
     dxf_buffer = io.StringIO()
     doc.write(dxf_buffer)
     return dxf_buffer.getvalue()
+
 
 if uploaded_file:
     with st.spinner("Processing vectors..."):
