@@ -12,33 +12,33 @@ st.write("Upload a vector PDF to convert it into a CAD-readable DXF format.")
 uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
 
 def convert_pdf_to_dxf(pdf_file):
-    # Load the PDF
     pdf = pdfium.PdfDocument(pdf_file)
-    
-    # Create a new DXF document
     doc = ezdxf.new('R2010')
     msp = doc.modelspace()
     
+    # PDF coordinates usually start from bottom-left
+    # DXF coordinates also start from bottom-left
+    
     for page_index in range(len(pdf)):
         page = pdf[page_index]
-        # Get all objects on the page
-        obj_list = page.get_objects()
         
-        for obj in obj_list:
-            # In pypdfium2 v4+, we check the object type via constants
-            # or by checking if it's a 'PdfPath' object
-            if isinstance(obj, pdfium.PdfPath):
-                # Get the path segments (moves, lines, curves)
+        # This is the modern way to loop through objects
+        for obj in page.get_objects():
+            # Check if the object is a PATH (lines, rectangles, etc.)
+            # Type 2 is usually the constant for PATH in PDFium
+            if obj.get_type() == 2: 
                 path_data = obj.get_path()
                 points = []
                 
+                # Iterate through path segments (MoveTo, LineTo, etc.)
                 for segment in path_data:
-                    # segment usually returns (type, x, y) or similar
-                    # We extract the coordinate points
-                    if len(segment) >= 3:
-                        points.append((segment[-2], segment[-1]))
+                    # Each segment contains points; we extract the last (x, y)
+                    if len(segment.points) > 0:
+                        pt = segment.points[-1]
+                        points.append((pt.x, pt.y))
                 
                 if len(points) >= 2:
+                    # Create the polyline in CAD space
                     msp.add_lwpolyline(points)
 
     dxf_buffer = io.StringIO()
