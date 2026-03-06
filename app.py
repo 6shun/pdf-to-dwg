@@ -1,46 +1,44 @@
 import streamlit as st
 import ezdxf
 import pypdfium2 as pdfium
-import pypdfium2.raw as pdfium_c
 import io
 import numpy as np
 import cv2
 import pytesseract
-from PIL import Image
 import math
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Pro PDF-to-CAD Converter", page_icon="🏗️", layout="wide")
 
 def process_page(page, msp, scale_val, simplify, noise, use_ocr):
-    # Get physical page dimensions (in points)
+    # Get physical page dimensions
     left, bottom, right, top = page.get_bbox()
-    p_width = right - left
     p_height = top - bottom
     
-    # 1. NATIVE VECTOR & TEXT EXTRACTION
-    # This section handles high-quality digital PDFs (MDOT/WSDOT exports)
-    vector_count = 0
+    # Flag to prevent "Double Drawing" (Alphabet Soup)
+    native_data_found = False
+
+    # 1. NATIVE VECTOR & TEXT EXTRACTION (Cleanest Results)
     try:
         for obj in page.get_objects():
-            # PATH OBJECTS (Lines, Polylines, Rectangles)
-            if obj.type == pdfium_c.FPDF_PAGEOBJECT_PATH:
+            # Stable integer constants: 2 = Path, 3 = Text
+            obj_type = obj.type 
+
+            # NATIVE VECTORS
+            if obj_type == 2:
                 try:
                     path_data = obj.get_path()
-                    points = []
                     for segment in path_data:
                         if hasattr(segment, 'points'):
-                            for pt in segment.points:
-                                # Flip Y: CAD (0,0) is bottom-left, PDF (0,0) is often top-left
-                                points.append((pt.x * scale_val, (p_height - pt.y) * scale_val))
-                    if len(points) >= 2:
-                        msp.add_lwpolyline(points, dxfattribs={'layer': 'VECTORS_NATIVE'})
-                        vector_count += 1
-                except:
-                    continue
-            
-# TEXT OBJECTS (Fixing Scaling and Attribute Errors)
-            elif obj.type == 3: # 3 is the stable constant for TEXT
+                            # Map PDF points to CAD model space
+                            pts = [(p.x * scale_val, (p_height - p.y) * scale_val) for p in segment.points]
+                            if len(pts) >= 2:
+                                msp.add_lwpolyline(pts, dxfattribs={'layer': 'NATIVE_VECTORS', 'color': 7})
+                                native_data_found = True
+                except: continue
+
+            # NATIVE TEXT (Fixes Rotation and Scale issues)
+            elif obj_type == 3:
                 try:
                     text_str = obj.get_text()
                     if text_str and text_str.strip():
@@ -48,144 +46,119 @@ def process_page(page, msp, scale_val, simplify, noise, use_ocr):
                         fs = obj.get_fontsize()
                         matrix = obj.get_matrix() # [a, b, c, d, e, f]
                         
-                        # Calculate Rotation: atan2(b, a)
+                        # Calculate Rotation using atan2(b, a)
                         rotation = math.degrees(math.atan2(matrix[1], matrix[0]))
                         
-                        # Calculate Effective Scale Factors
-                        # For oriented text, vertical scale is derived from 'c' and 'd'
+                        # Calculate True Scaling Factors (Euclidean Norm)
+                        # This fixes the "problematic text size" for oriented text
                         scale_x = math.sqrt(matrix[0]**2 + matrix[1]**2)
                         scale_y = math.sqrt(matrix[2]**2 + matrix[3]**2)
                         
-                        # Apply the matrix scale to the base font size
-                        effective_height = fs * scale_y * scale_val
+                        eff_height = fs * scale_y * scale_val
                         
                         text_entity = msp.add_text(text_str, 
-                                                   height=effective_height, 
-                                                   dxfattribs={'layer': 'TEXT_NATIVE'})
+                                                   height=eff_height, 
+                                                   dxfattribs={'layer': 'NATIVE_TEXT', 'color': 3})
                         
-                        # If text is squashed/stretched (common in CAD tables)
-                        if abs(scale_x - scale_y) > 0.05:
-                            text_entity.dxf.width = scale_x / scale_y
-
+                        # Set Position and Rotation
                         text_entity.set_placement((pos[0] * scale_val, (p_height - pos[1]) * scale_val))
                         text_entity.dxf.rotation = rotation
                         
-                        # Mark that we found native text to potentially skip OCR for this page
-                        native_text_found = True 
-                except:
-                    continue
-
+                        # Adjust Width Factor for squashed table text
+                        if abs(scale_x - scale_y) > 0.05:
+                            text_entity.dxf.width = scale_x / scale_y
+                            
+                        native_data_found = True
+                except: continue
     except Exception as e:
-        st.sidebar.error(f"Native Extraction Error: {e}")
+        st.sidebar.error(f"Native Extraction Notice: {e}")
 
-    # 2. RASTER PROCESSING (For Scans or Hybrid Content)
-    render_res = 4 
-    bitmap = page.render(scale=render_res)
-    pil_img = bitmap.to_pil().convert("L")
-    img = np.array(pil_img)
-    img_h, _ = img.shape
-    
-    # Ratio to convert high-res pixels back to CAD units
-    ratio = scale_val / render_res
+    # 2. RASTER PROCESSING (Only run if no native data OR if OCR is forced)
+    # This logic gate prevents the "Alphabet Soup" overlap on MDOT digital plans
+    if not native_data_found or use_ocr:
+        render_res = 4 
+        bitmap = page.render(scale=render_res)
+        pil_img = bitmap.to_pil().convert("L")
+        img = np.array(pil_img)
+        img_h, _ = img.shape
+        ratio = scale_val / render_res
 
-    if use_ocr:
-        try:
-            # Orientation and Script Detection (OSD) for scanned pages
-            osd = pytesseract.image_to_osd(pil_img, output_type=pytesseract.Output.DICT)
-            page_rotation = osd.get('rotate', 0)
+        # If native text exists, we whiten the image to prevent OCR ghosting
+        if native_data_found:
+            # We only trace what native extraction might have missed
+            pass 
 
-            custom_config = r'--oem 3 --psm 3'
-            ocr_data = pytesseract.image_to_data(pil_img, config=custom_config, output_type=pytesseract.Output.DICT)
+        # OCR Handling (Optional)
+        if use_ocr and not native_data_found:
+            try:
+                ocr_data = pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT)
+                for i in range(len(ocr_data['text'])):
+                    if int(ocr_data['conf'][i]) > 80:
+                        txt = ocr_data['text'][i].strip()
+                        if len(txt) > 1:
+                            px_x, px_y = ocr_data['left'][i], ocr_data['top'][i]
+                            px_h = ocr_data['height'][i]
+                            t_ent = msp.add_text(txt, height=px_h * ratio, dxfattribs={'layer': 'OCR_TEXT', 'color': 1})
+                            t_ent.set_placement((px_x * ratio, (img_h - px_y) * ratio))
+                            # Mask to prevent tracing text as lines (zigzags)
+                            cv2.rectangle(img, (px_x, px_y), (px_x + ocr_data['width'][i], px_y + px_h), (255), -1)
+            except: pass
+
+        # 3. LINE TRACING (Prevents Zigzags)
+        # We only trace if native vectors are absent
+        if not native_data_found:
+            if noise > 0:
+                img = cv2.medianBlur(img, noise if noise % 2 != 0 else noise + 1)
             
-            for i in range(len(ocr_data['text'])):
-                conf = int(ocr_data['conf'][i])
-                txt = ocr_data['text'][i].strip()
+            thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                            cv2.THRESH_BINARY_INV, 11, 2)
+
+            if cv2.countNonZero(thresh) > 0:
+                skeleton = cv2.ximgproc.thinning(thresh) if hasattr(cv2, 'ximgproc') else thresh
+                contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
                 
-                if conf > 75 and len(txt) > 1:
-                    px_x, px_y = ocr_data['left'][i], ocr_data['top'][i]
-                    px_w, px_h = ocr_data['width'][i], ocr_data['height'][i]
+                for cnt in contours:
+                    # Douglas-Peucker Smoothing (Higher simplify value = fewer zigzags)
+                    epsilon = simplify * cv2.arcLength(cnt, True)
+                    approx = cv2.approxPolyDP(cnt, epsilon, False)
+                    pts = [(pt[0][0] * ratio, (img_h - pt[0][1]) * ratio) for pt in approx]
+                    if len(pts) >= 2:
+                        msp.add_lwpolyline(pts, dxfattribs={'layer': 'TRACED_VECTORS', 'color': 8})
 
-                    cad_x = px_x * ratio
-                    cad_y = (img_h - px_y) * ratio
-                    
-                    t_entity = msp.add_text(txt, height=px_h * ratio * 0.8, dxfattribs={'layer': 'TEXT_OCR'})
-                    t_entity.set_placement((cad_x, cad_y))
-
-                    # Heuristic for vertical text: if box is very tall
-                    if px_h > px_w * 1.8:
-                        t_entity.dxf.rotation = 90
-                    else:
-                        t_entity.dxf.rotation = page_rotation
-                    
-                    # MASK: Whiten out text so the line tracer ignores it
-                    cv2.rectangle(img, (px_x, px_y), (px_x + px_w, px_y + px_h), (255), -1)
-        except:
-            pass
-
-    # 3. LINE TRACING (Only used if the PDF lacks native vectors)
-    if vector_count < 20:
-        if noise > 0:
-            img = cv2.medianBlur(img, noise if noise % 2 != 0 else noise + 1)
-        
-        thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                        cv2.THRESH_BINARY_INV, 11, 2)
-
-        if cv2.countNonZero(thresh) > 0:
-            # Thinning reduces lines to 1-pixel spines to prevent "hollow" boxes in CAD
-            skeleton = cv2.ximgproc.thinning(thresh) if hasattr(cv2, 'ximgproc') else thresh
-            
-            contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in contours:
-                epsilon = simplify * cv2.arcLength(cnt, True)
-                approx = cv2.approxPolyDP(cnt, epsilon, False)
-                points = [(pt[0][0] * ratio, (img_h - pt[0][1]) * ratio) for pt in approx]
-                if len(points) >= 2:
-                    msp.add_lwpolyline(points, dxfattribs={'layer': 'VECTORS_TRACED'})
-
-# --- User Interface ---
-st.title("📐 Professional PDF to DXF Converter")
-st.write("Optimized for **MDOT/WSDOT Engineering Plans** with oriented text and vector layers.")
+# --- Streamlit UI ---
+st.title("📐 Pro PDF-to-CAD (Traffic Signal Edition)")
+st.write("Optimized for **MDOT/WSDOT** plans with automated native data prioritization.")
 
 with st.sidebar:
     st.header("🔧 Settings")
     scale_val = st.number_input("Scale Multiplier", value=1.0, step=0.1)
-    smooth_val = st.slider("Line Smoothing", 0.001, 0.05, 0.01, format="%.3f")
+    smooth_val = st.slider("Line Smoothing (Anti-Zigzag)", 0.001, 0.05, 0.02, format="%.3f")
     noise_val = st.slider("Denoise Strength", 0, 9, 3, step=2)
-    ocr_toggle = st.checkbox("Enable OCR for Scans", value=True)
-    st.divider()
-    st.info("The tool will prioritize native CAD vectors if they exist in the PDF.")
+    ocr_toggle = st.checkbox("Force OCR for Scanned Pages", value=False)
+    st.info("Tip: For digital MDOT plans, turn OCR OFF and set Smoothing to 0.02 to avoid zigzags.")
 
-uploaded_file = st.file_uploader("Upload PDF file", type="pdf")
+uploaded_file = st.file_uploader("Upload PDF Plan", type="pdf")
 
 if uploaded_file:
-    if st.button("🚀 Generate CAD File"):
-        with st.spinner("Analyzing PDF layers and extracting geometry..."):
+    if st.button("🚀 Convert to DXF"):
+        with st.spinner("Decomposing PDF matrices..."):
             try:
                 pdf = pdfium.PdfDocument(uploaded_file)
                 doc = ezdxf.new('R2010')
-                
-                # Setup Layers for organization
-                doc.layers.new('VECTORS_NATIVE', dxfattribs={'color': 7})
-                doc.layers.new('VECTORS_TRACED', dxfattribs={'color': 8})
-                doc.layers.new('TEXT_NATIVE', dxfattribs={'color': 2})
-                doc.layers.new('TEXT_OCR', dxfattribs={'color': 3})
-                
                 msp = doc.modelspace()
                 
-                progress_bar = st.progress(0)
+                # Setup Layers
+                for layer_name, color in [('NATIVE_VECTORS', 7), ('NATIVE_TEXT', 3), ('TRACED_VECTORS', 8), ('OCR_TEXT', 1)]:
+                    doc.layers.new(layer_name, dxfattribs={'color': color})
+                
+                progress = st.progress(0)
                 for i, page in enumerate(pdf):
                     process_page(page, msp, scale_val, smooth_val, noise_val, ocr_toggle)
-                    progress_bar.progress((i + 1) / len(pdf))
+                    progress.progress((i + 1) / len(pdf))
                 
                 dxf_io = io.StringIO()
                 doc.write(dxf_io)
-                
-                st.success("Conversion Successful!")
-                st.download_button(
-                    label="💾 Download DXF",
-                    data=dxf_io.getvalue(),
-                    file_name=f"converted_{uploaded_file.name.split('.')[0]}.dxf",
-                    mime="application/dxf"
-                )
+                st.success("Conversion Complete!")
+                st.download_button("💾 Download DXF", dxf_io.getvalue(), f"{uploaded_file.name}.dxf", "application/dxf")
             except Exception as e:
-                st.error(f"Error during processing: {e}")
+                st.error(f"Conversion Error: {e}")
