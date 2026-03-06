@@ -11,9 +11,10 @@ from PIL import Image
 st.set_page_config(page_title="Pro PDF-to-CAD Converter", page_icon="🏗️", layout="wide")
 
 def process_page(page, msp, scale, simplify, noise, use_ocr):
+    # Get page dimensions for coordinate flipping
+    _, _, width, height = page.get_rect() 
+
     # 1. ATTEMPT VECTOR EXTRACTION
-    # (Fastest and most accurate for PDFs exported from CAD)
-    found_vectors = False
     try:
         for obj in page.get_objects():
             if obj.type == 2: # PATH object
@@ -22,36 +23,37 @@ def process_page(page, msp, scale, simplify, noise, use_ocr):
                 for segment in path_data:
                     if hasattr(segment, 'points'):
                         for pt in segment.points:
-                            points.append((pt.x * scale, pt.y * scale))
+                            # FLIP Y: height - pt.y
+                            points.append((pt.x * scale, (height - pt.y) * scale))
                 if len(points) >= 2:
                     msp.add_lwpolyline(points)
-                    found_vectors = True
-    except:
-        pass
+    except Exception as e:
+        st.sidebar.error(f"Vector Error: {e}")
 
-    # 2. RASTER PROCESSING (For Scans or Hybrid PDFs)
-    # We render at scale=4 (approx 300 DPI) for high tracing accuracy
-    bitmap = page.render(scale=4)
+    # 2. RASTER PROCESSING
+    bitmap = page.render(scale=4) # ~288 DPI
     pil_img = bitmap.to_pil().convert("L")
     img = np.array(pil_img)
 
     # OCR TEXT HANDLING
     if use_ocr:
         try:
-            # Get detailed OCR data
-            ocr_data = pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT)
+            # Adding --psm 3 helps Tesseract detect sparse text on blueprints
+            custom_config = r'--oem 3 --psm 3'
+            ocr_data = pytesseract.image_to_data(pil_img, config=custom_config, output_type=pytesseract.Output.DICT)
+            
             for i in range(len(ocr_data['text'])):
-                # Confidence > 80 to avoid "ghost" text artifacts
-                if int(ocr_data['conf'][i]) > 80:
-                    x, y, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+                if int(ocr_data['conf'][i]) > 70: # Slightly lower threshold for blueprints
                     txt = ocr_data['text'][i].strip()
-                    
                     if len(txt) > 1:
-                        # Add real CAD Text entity
-                        msp.add_text(txt, height=h*scale).set_placement(
-                            (x * scale, (pil_img.height - y) * scale)
+                        x, y, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+                        
+                        # Convert image coords to CAD coords
+                        # Note: pil_img.height is used here because OCR data is relative to the pixels
+                        msp.add_text(txt, height=h * (scale/4)).set_placement(
+                            (x * (scale/4), (pil_img.height - y) * (scale/4))
                         )
-                        # MASK: Whiten out the text so the line-tracer ignores it
+                        # MASK: Whiten out the text
                         cv2.rectangle(img, (x, y), (x + w, y + h), (255), -1)
         except Exception as e:
             st.sidebar.warning(f"OCR Notice: {e}")
