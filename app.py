@@ -39,8 +39,8 @@ def process_page(page, msp, scale_val, simplify, noise, use_ocr):
                 except:
                     continue
             
-# TEXT OBJECTS (Fixing the Scaling Issue)
-            elif obj.type == pdfium_c.FPDF_PAGEOBJECT_TEXT:
+# TEXT OBJECTS (Fixing Scaling and Attribute Errors)
+            elif obj.type == 3: # 3 is the stable constant for TEXT
                 try:
                     text_str = obj.get_text()
                     if text_str and text_str.strip():
@@ -48,29 +48,30 @@ def process_page(page, msp, scale_val, simplify, noise, use_ocr):
                         fs = obj.get_fontsize()
                         matrix = obj.get_matrix() # [a, b, c, d, e, f]
                         
-                        # 1. CALCULATE ROTATION
+                        # Calculate Rotation: atan2(b, a)
                         rotation = math.degrees(math.atan2(matrix[1], matrix[0]))
                         
-                        # 2. CALCULATE EFFECTIVE FONT SIZE
-                        # The 'a' and 'b' components of the matrix determine horizontal scaling
-                        # The 'c' and 'd' components determine vertical scaling
-                        # We calculate the hypotenuse to get the true scale factor
+                        # Calculate Effective Scale Factors
+                        # For oriented text, vertical scale is derived from 'c' and 'd'
                         scale_x = math.sqrt(matrix[0]**2 + matrix[1]**2)
                         scale_y = math.sqrt(matrix[2]**2 + matrix[3]**2)
                         
-                        # Use the vertical scale factor for the CAD text height
+                        # Apply the matrix scale to the base font size
                         effective_height = fs * scale_y * scale_val
                         
                         text_entity = msp.add_text(text_str, 
                                                    height=effective_height, 
                                                    dxfattribs={'layer': 'TEXT_NATIVE'})
                         
-                        # Apply horizontal scaling (width factor) if it differs from height
-                        if abs(scale_x - scale_y) > 0.1:
+                        # If text is squashed/stretched (common in CAD tables)
+                        if abs(scale_x - scale_y) > 0.05:
                             text_entity.dxf.width = scale_x / scale_y
 
                         text_entity.set_placement((pos[0] * scale_val, (p_height - pos[1]) * scale_val))
                         text_entity.dxf.rotation = rotation
+                        
+                        # Mark that we found native text to potentially skip OCR for this page
+                        native_text_found = True 
                 except:
                     continue
 
