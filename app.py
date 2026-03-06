@@ -12,7 +12,9 @@ st.set_page_config(page_title="Pro PDF-to-CAD Converter", page_icon="🏗️", l
 
 def process_page(page, msp, scale_val, simplify, noise, use_ocr):
     # Get physical page dimensions (in points)
-    _, _, p_width, p_height = page.get_rect()
+    left, bottom, right, top = page.get_bbox()
+    p_width = right - left
+    p_height = top - bottom
     
     # 1. ATTEMPT VECTOR EXTRACTION
     # (Prioritize this for MDOT/WSDOT style digital exports)
